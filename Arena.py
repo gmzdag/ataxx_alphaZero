@@ -60,13 +60,14 @@ class Arena():
                 log.error(f'Action {action} is not valid!')
                 log.debug(f'valids = {valids}')
                 assert valids[action] > 0
+            
+            board, curPlayer, *_ = self.game.getNextState(board, curPlayer, action)
 
             # Notifying the opponent for the move
             opponent = players[-curPlayer + 1]
             if hasattr(opponent, "notify"):
                 opponent.notify(board, action)
 
-            board, curPlayer = self.game.getNextState(board, curPlayer, action)
 
         for player in players[0], players[2]:
             if hasattr(player, "endGame"):

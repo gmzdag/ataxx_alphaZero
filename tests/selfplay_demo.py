@@ -1,78 +1,94 @@
 """
-Ataxx AlphaZero Self-Play Test
-----------------------------------
-Bu dosya, Ataxx oyunu üzerinde AlphaZero tarzı iki ajan arasında zaman sınırlı bir self-play (kendi kendine oyun) simülasyonu gerçekleştirir. 
-Amaç, MCTS (Monte Carlo Tree Search) algoritmasının iki oyuncu arasında dönüşümlü olarak çalıştığı ve 
-her oyuncunun süresinin azaldığı bir tam oyun akışını gözlemlemektir.
-
-Test Edilen Bileşenler:
-- AtaxxGame      → Tahta yapısı, hamle geçerliliği, oyuncu geçişi, süre kontrolü
-- NNetWrapper    → Sinir ağının (policy + value) tahmin mekanizması
-- MCTS           → Hamle olasılıklarını (π) üreten arama algoritması
-- Timer sistemi  → Oyuncu sürelerinin güncel tutulması ve bitiş koşullarını etkileyebilmesi
-
-Adım adım işlemler:
-1️ 7x7 boyutlu tahta ve 100 saniyelik süre limitiyle oyun başlatılır.  
-2️ Her oyuncu kendi MCTS ajanını (mcts1, mcts2) kullanarak hamle olasılıklarını üretir.  
-3️ MCTS çıktısına göre olasılıksal bir hamle seçilir ve uygulanır.  
-4️ Tahta güncellenir, oyuncu değişir ve süreler azaltılır.  
-5️ Oyun; biri kazanana, süresi dolana veya maksimum hamle (200) limitine ulaşılana kadar devam eder.
-
-Bu test, AlphaZero tabanlı Ataxx ajanlarının zaman baskısı altında karar verme ve rekabet etme süreçlerini gözlemlemek için kullanılır.
+Ataxx AlphaZero Self-Play 
+-------------------------------------------------
+Bu sürümde oyuncuların süreleri, sıraları geldiğinde akmaya başlar.
+Her oyuncunun kendi turunda MCTS düşünme süresi kendi saatinden düşülür.
+Oyun, biri kazanırsa, hamle kalmazsa veya süresi dolarsa sona erer.
 """
-import sys, os, time
+
+import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import sys, os, time
 import numpy as np
 from utils import dotdict
 from ataxx.AtaxxGame import AtaxxGame
 from ataxx.pytorch.NNet import NNetWrapper
 from MCTS import MCTS
 
-print("🤖 Ataxx Self-Play (Timerlı) başlıyor...\n")
+print("🤖 Ataxx Self-Play  başlıyor...\n")
 
-game = AtaxxGame(7)
+# ------------------------------------------------------------------
+# 1️⃣ Oyun başlat
+game = AtaxxGame(n=7)
 nnet = NNetWrapper(game)
+args = dotdict({'numMCTSSims': 50, 'cpuct': 1.0})
 
-args = dotdict({'numMCTSSims': 10, 'cpuct': 1.0})
 mcts1 = MCTS(game, nnet, args)
 mcts2 = MCTS(game, nnet, args)
 
 board = game.getInitBoard()
 player = 1
-timers = {1: 100, -1: 100}
+timers = {1: 100.0, -1: 100.0}
 move_count = 0
+max_moves = 200
 
+# ------------------------------------------------------------------
 def display_board(board):
     symbols = {1: "X", -1: "O", 0: "."}
     for row in board:
         print(" ".join(symbols[int(x)] for x in row))
     print()
 
+# ------------------------------------------------------------------
 while True:
     move_count += 1
     print(f"\n========= Hamle {move_count} =========")
     display_board(board)
-    print(f"⏱ P1: {timers[1]:.1f}s | P2: {timers[-1]:.1f}s")
+    print(f"⏱ P1: {game.timers[1]:.2f}s | P2: {game.timers[-1]:.2f}s") 
+    turn_start = time.time()
 
-    canon = game.getCanonicalForm(board, player)
-    canon_input = np.stack([(canon == 1).astype(np.float32),
-                            (canon == -1).astype(np.float32)])
-    mcts = mcts1 if player == 1 else mcts2
-    pi = mcts.getActionProb(canon_input, temp=1)
+    canon = game.getCanonicalForm(board, player)             
+    mcts = mcts1 if player == 1 else mcts2                 
+    temp = 1  # veya (1 if move_count < 15 else 0)
+    pi = mcts.getActionProb(canon, temp=temp)
+
+    valids = game.getValidMoves(board, player)              
+    if np.sum(valids) == 0:
+        print(f"♟️ Oyuncu {player} için hamle yok → kayıp.")
+        result = -player
+        break
+
+    pi = pi * valids
+    s = np.sum(pi)
+    pi = (pi / s) if s > 0 else (valids / np.sum(valids))    
+
     action = np.random.choice(len(pi), p=pi)
 
-    start_time = time.time()
-    board, player, timers = game.getNextState(board, player, action, start_time=start_time)
-    result = game.getGameEnded(board, player, timers)
+    elapsed = time.time() - turn_start
+    board, next_player, timers = game.getNextState(board, player, action, elapsed=elapsed)
+    if next_player == player:
+        # yani aynı oyuncuya tekrar sıra geldiyse
+        continue
+    else:
+        player = next_player
 
+    
+    result = game.getGameEnded(board, player)
     if result != 0:
         print("\n🏁 Oyun bitti!")
         display_board(board)
-        print(f"Sonuç: {result} | P1 süresi: {timers[1]:.2f}s | P2 süresi: {timers[-1]:.2f}s")
+        print(f"Sonuç: {result} | P1: {game.timers[1]:.2f}s | P2: {game.timers[-1]:.2f}s")
         break
 
-    if move_count >= 200:
-        print("\n⚠️ Maksimum hamleye ulaşıldı, oyun durduruldu.")
+    #  Oyun bitti mi kontrol et
+    result = game.getGameEnded(board, player)
+    if result != 0:
+        print("\n🏁 Oyun bitti!")
         display_board(board)
+        print(f"Sonuç: {result} | P1: {timers[1]:.2f}s | P2: {timers[-1]:.2f}s")
+        break
+
+    if move_count >= max_moves:
+        print("\n⚠️ Maksimum hamle sayısına ulaşıldı.")
         break

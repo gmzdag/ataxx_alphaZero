@@ -48,10 +48,17 @@ class NNetWrapper(NeuralNet):
                 sample_ids = np.random.randint(len(examples), size=args.batch_size)
                 boards, target_pis, target_vs = list(zip(*[examples[i] for i in sample_ids]))
 
-                # --- veri tensörlerine dönüştür ---
-                boards = torch.FloatTensor(np.array(boards))
-                target_pis = torch.FloatTensor(np.array(target_pis))
-                target_vs = torch.FloatTensor(np.array(target_vs))
+                # boards: (B, n, n) kanonik → (B, 2, n, n)
+                boards_np = np.array(boards, dtype=np.float32)                     # (B, n, n)
+                boards_np = np.stack([(boards_np == 1).astype(np.float32),
+                                    (boards_np == -1).astype(np.float32)], axis=1)  # (B, 2, n, n)
+
+                boards     = torch.FloatTensor(boards_np)
+                target_pis = torch.FloatTensor(np.array(target_pis, dtype=np.float32))  # (B, action_size), 1-hot/dağılım
+                
+                target_vs_np = np.array(target_vs, dtype=np.float32)
+                assert np.all(np.abs(target_vs_np) <= 1.1), f"Invalid target values: {target_vs_np}"
+                target_vs = torch.FloatTensor(target_vs_np)
 
                 if args.cuda:
                     boards, target_pis, target_vs = boards.cuda(), target_pis.cuda(), target_vs.cuda()
@@ -72,16 +79,28 @@ class NNetWrapper(NeuralNet):
                 t.set_postfix(Loss_pi=pi_losses.avg, Loss_v=v_losses.avg)
 
     def predict(self, board):
-        """board: np array canonical form (1=player, -1=opponent)"""
-        start = time.time()
-        board = torch.FloatTensor(board.astype(np.float32))
-        if args.cuda:
-            board = board.cuda()
-        board = board.view(1, 2, self.board_x, self.board_y)
+        """board: np array canonical form (n x n), values in {-1,0,1} w.r.t current player"""
+        import torch
+        import numpy as np
         self.nnet.eval()
+
+        # 7x7 kanonik tahtayı 2 kanala çevir: [mevcut oyuncu, rakip]
+        # shape: [1, 2, n, n]
+        b = board.astype(np.float32)
+        two_channel = np.stack([(b == 1).astype(np.float32),
+                                (b == -1).astype(np.float32)], axis=0)[None, ...]
+        x = torch.from_numpy(two_channel)
+        if args.cuda:
+            x = x.cuda()
+
         with torch.no_grad():
-            pi, v = self.nnet(board)
-        return torch.exp(pi).cpu().numpy()[0], v.cpu().numpy()[0]
+            pi_log, v = self.nnet(x)  # pi_log: [1, action_size] (log-prob ya da logits), v: [1, 1]
+
+        # Eğer model log-softmax döndürüyorsa exp ile olasılığa çeviriyoruz (senin koddaki gibi)
+        pi = torch.exp(pi_log).cpu().numpy()[0]   # [action_size]
+        v  = v.squeeze().item()
+        return pi, v
+
 
     def loss_pi(self, targets, outputs):
         return -torch.sum(targets * outputs) / targets.size()[0]

@@ -61,13 +61,23 @@ class Coach():
                 trainExamples.append([b, self.curPlayer, p, None])
 
             action = np.random.choice(len(pi), p=pi)
-            board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
+            board, self.curPlayer, *_ = self.game.getNextState(board, self.curPlayer, action)
 
             r = self.game.getGameEnded(board, self.curPlayer)
 
             if r != 0:
-                return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
+                result = []
+                for x in trainExamples:
+                    board_example, player_who_played, policy, _ = x
 
+                    if player_who_played == self.curPlayer:
+                        value = r
+                    else:
+                        value = -r
+                    
+                    result.append((board_example, policy, value))
+                
+                return result
     def learn(self):
         """
         Performs numIters iterations with numEps episodes of self-play in each

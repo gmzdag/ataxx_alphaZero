@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/Acer/Desktop/github/ataxx_alphaZero/mlruns/658495417861248601/24f71103d1664b7dbde02ee648e7d8e9/artifacts
+end_time: 1762600132075
+entry_point_name: ''
+experiment_id: '658495417861248601'
+lifecycle_stage: active
+run_id: 24f71103d1664b7dbde02ee648e7d8e9
+run_name: trial_0
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1762599960950
+status: 3
+tags: []
+user_id: Acer
