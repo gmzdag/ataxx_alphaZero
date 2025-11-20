@@ -1,4 +1,6 @@
 import logging
+import time
+import inspect
 
 from tqdm import tqdm
 
@@ -10,7 +12,7 @@ class Arena():
     An Arena class where any 2 agents can be pit against each other.
     """
 
-    def __init__(self, player1, player2, game, display=None):
+    def __init__(self, player1, player2, game, display=None, use_timers=False):
         """
         Input:
             player 1,2: two functions that takes board as input, return action
@@ -26,6 +28,9 @@ class Arena():
         self.player2 = player2
         self.game = game
         self.display = display
+        self.use_timers = use_timers
+        signature = inspect.signature(self.game.getNextState)
+        self._supports_elapsed = 'elapsed' in signature.parameters
 
     def playGame(self, verbose=False):
         """
@@ -52,16 +57,23 @@ class Arena():
                 assert self.display
                 print("Turn ", str(it), "Player ", str(curPlayer))
                 self.display(board)
-            action = players[curPlayer + 1](self.game.getCanonicalForm(board, curPlayer))
+            canonical = self.game.getCanonicalForm(board, curPlayer)
+            start_time = time.perf_counter() if self.use_timers and self._supports_elapsed else None
+            action = players[curPlayer + 1](canonical)
 
-            valids = self.game.getValidMoves(self.game.getCanonicalForm(board, curPlayer), 1)
+            valids = self.game.getValidMoves(canonical, 1)
 
             if valids[action] == 0:
                 log.error(f'Action {action} is not valid!')
                 log.debug(f'valids = {valids}')
                 assert valids[action] > 0
             
-            board, curPlayer, *_ = self.game.getNextState(board, curPlayer, action)
+            kwargs = {}
+            if start_time is not None:
+                elapsed = time.perf_counter() - start_time
+                kwargs['elapsed'] = elapsed
+
+            board, curPlayer, *_ = self.game.getNextState(board, curPlayer, action, **kwargs)
 
             # Notifying the opponent for the move
             opponent = players[-curPlayer + 1]

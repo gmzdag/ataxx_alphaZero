@@ -16,6 +16,7 @@ Tarih: 2025
 
 from Game import Game
 from .AtaxxLogic import Board
+from .AtaxxDisplay import AtaxxDisplay
 import numpy as np
 
 
@@ -56,7 +57,7 @@ class AtaxxGame(Game):
         return np.unravel_index(a, (self.n, self.n, self.n, self.n))
 
     # ------------------------------
-    def getNextState(self, board, player, action, start_time=None, elapsed=0.0):
+    def getNextState(self, board, player, action, elapsed=0.0):
         """
         Verilen hamleyi uygular ve sonucu döndürür.
 
@@ -76,7 +77,7 @@ class AtaxxGame(Game):
 
         # Süreyi her durumda azalt
         if elapsed and elapsed > 0:
-            self.timers[player] -= elapsed
+            self.timers[player] = max(0.0, self.timers[player] - float(elapsed))
 
         b.execute_move(((x, y), (nx, ny)), player)
         return b.pieces, -player, dict(self.timers)
@@ -159,9 +160,60 @@ class AtaxxGame(Game):
         return board * player
 
     def stringRepresentation(self, board):
-        """Tahtayı byte dizisine dönüştürür (MCTS için)."""
-        return board.astype(np.int8).tobytes()
+        """Tahtayı ve kalan süreleri byte dizisine dönüştürür."""
+        board_bytes = np.asarray(board, dtype=np.int8).tobytes()
+        timer_bytes = np.asarray(
+            [self.timers[1], self.timers[-1]], dtype=np.float32
+        ).tobytes()
+        return board_bytes + timer_bytes
 
     def getSymmetries(self, board, pi):
-        """Simetri dönüşümleri (şu an yalnızca kimlik dönüşümü)."""
-        return [(board, pi)]
+        """
+        Tahta ve politika için 8 simetri dönüşümünü döndürür.
+
+        90° döndürmeler ve yatay yansımalar uygulanır. Politika vektörü önce
+        (n, n, n, n) tensörüne çevrilir ve her hamlenin kaynak/hedef koordinatı
+        aynı dönüşümle yeniden haritalanır.
+        """
+        board = np.array(board, copy=True)
+        pi_tensor = np.reshape(np.array(pi, dtype=np.float32),
+                               (self.n, self.n, self.n, self.n))
+        symmetries = []
+        for rot in range(4):
+            for flip in (False, True):
+                transformed_board = self._apply_board_transform(board, rot, flip)
+                transformed_pi = self._apply_policy_transform(pi_tensor, rot, flip)
+                symmetries.append((transformed_board, transformed_pi.flatten()))
+        return symmetries
+
+    @staticmethod
+    def display(board):
+        AtaxxDisplay.display(board)
+
+    # ------------------------------
+    def _apply_board_transform(self, board, rot, flip):
+        transformed = np.rot90(board, rot)
+        if flip:
+            transformed = np.fliplr(transformed)
+        return transformed.astype(board.dtype, copy=False)
+
+    def _apply_policy_transform(self, policy_tensor, rot, flip):
+        transformed = np.zeros_like(policy_tensor)
+        for x in range(self.n):
+            for y in range(self.n):
+                tx, ty = self._transform_coord(x, y, rot, flip)
+                for nx in range(self.n):
+                    for ny in range(self.n):
+                        val = policy_tensor[x, y, nx, ny]
+                        if val == 0:
+                            continue
+                        tnx, tny = self._transform_coord(nx, ny, rot, flip)
+                        transformed[tx, ty, tnx, tny] = val
+        return transformed
+
+    def _transform_coord(self, x, y, rot, flip):
+        for _ in range(rot % 4):
+            x, y = y, self.n - 1 - x
+        if flip:
+            y = self.n - 1 - y
+        return x, y

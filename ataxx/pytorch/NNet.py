@@ -41,7 +41,7 @@ class NNetWrapper(NeuralNet):
             pi_losses = AverageMeter()
             v_losses = AverageMeter()
 
-            batch_count = int(len(examples) / args.batch_size)
+            batch_count = max(1, int(np.ceil(len(examples) / args.batch_size)))
             t = tqdm(range(batch_count), desc='Training Net')
 
             for _ in t:
