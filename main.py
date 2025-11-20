@@ -1,10 +1,13 @@
 import logging
+import time
 
 import coloredlogs
+import mlflow
 
 from Coach import Coach
 from ataxx.AtaxxGame import AtaxxGame as Game
 from ataxx.pytorch.NNet import NNetWrapper as nn
+from ataxx.pytorch.NNet import args as nnet_args
 from utils import *
 
 log = logging.getLogger(__name__)
@@ -23,34 +26,43 @@ args = dotdict({
 
     'checkpoint': './temp/',
     'load_model': False,
-    'load_folder_file': ('/dev/models/8x100x50','best.pth.tar'),
+    'load_folder_file': ('./temp','best.pth.tar'),
     'numItersForTrainExamplesHistory': 20,
 
 })
 
 
 def main():
-    log.info('Loading %s...', Game.__name__)
-    g = Game(n=7, timer_limit=100)
+    experiment_name = 'ataxx_alpha_zero'
+    mlflow.set_experiment(experiment_name)
+    run_name = f"ataxx_run_{time.strftime('%Y%m%d_%H%M%S')}"
 
-    log.info('Loading %s...', nn.__name__)
-    nnet = nn(g)
+    with mlflow.start_run(run_name=run_name):
+        log.info('Starting MLflow run "%s" under experiment "%s"', run_name, experiment_name)
+        mlflow.log_params(dict(args))
+        mlflow.log_params({f"nnet_{k}": v for k, v in dict(nnet_args).items()})
 
-    if args.load_model:
-        log.info('Loading checkpoint "%s/%s"...', args.load_folder_file[0], args.load_folder_file[1])
-        nnet.load_checkpoint(args.load_folder_file[0], args.load_folder_file[1])
-    else:
-        log.warning('Not loading a checkpoint!')
+        log.info('Loading %s...', Game.__name__)
+        g = Game(n=7, timer_limit=100)
 
-    log.info('Loading the Coach...')
-    c = Coach(g, nnet, args)
+        log.info('Loading %s...', nn.__name__)
+        nnet = nn(g)
 
-    if args.load_model:
-        log.info("Loading 'trainExamples' from file...")
-        c.loadTrainExamples()
+        if args.load_model:
+            log.info('Loading checkpoint "%s/%s"...', args.load_folder_file[0], args.load_folder_file[1])
+            nnet.load_checkpoint(args.load_folder_file[0], args.load_folder_file[1])
+        else:
+            log.warning('Not loading a checkpoint!')
 
-    log.info('Starting the learning process 🎉')
-    c.learn()
+        log.info('Loading the Coach...')
+        c = Coach(g, nnet, args)
+
+        if args.load_model:
+            log.info("Loading 'trainExamples' from file...")
+            c.loadTrainExamples()
+
+        log.info('Starting the learning process 🎉')
+        c.learn()
 
 
 if __name__ == "__main__":

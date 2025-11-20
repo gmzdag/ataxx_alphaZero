@@ -26,7 +26,7 @@ class NNetWrapper(NeuralNet):
         self.nnet = AtaxxNNet(game, args)
         self.board_x, self.board_y = game.getBoardSize()
         self.action_size = game.getActionSize()
-
+        self.optimizer = optim.Adam(self.nnet.parameters(), lr=args.lr)
         if args.cuda:
             self.nnet.cuda()
 
@@ -34,7 +34,7 @@ class NNetWrapper(NeuralNet):
         """
         examples: list of (board, pi, v)
         """
-        optimizer = optim.Adam(self.nnet.parameters(), lr=args.lr)
+        epoch_history = []
         for epoch in range(args.epochs):
             print('EPOCH ::: ' + str(epoch + 1))
             self.nnet.train()
@@ -70,13 +70,20 @@ class NNetWrapper(NeuralNet):
                 total_loss = l_pi + l_v
 
                 # --- backward ---
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 total_loss.backward()
-                optimizer.step()
+                self.optimizer.step()
 
                 pi_losses.update(l_pi.item(), boards.size(0))
                 v_losses.update(l_v.item(), boards.size(0))
                 t.set_postfix(Loss_pi=pi_losses.avg, Loss_v=v_losses.avg)
+
+            epoch_history.append({
+                'epoch': epoch + 1,
+                'loss_pi': pi_losses.avg,
+                'loss_v': v_losses.avg,
+            })
+        return epoch_history
 
     def predict(self, board):
         """board: np array canonical form (n x n), values in {-1,0,1} w.r.t current player"""
@@ -112,7 +119,10 @@ class NNetWrapper(NeuralNet):
         filepath = os.path.join(folder, filename)
         if not os.path.exists(folder):
             os.mkdir(folder)
-        torch.save({'state_dict': self.nnet.state_dict()}, filepath)
+        torch.save({
+            'state_dict': self.nnet.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+        }, filepath)
 
     def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
         filepath = os.path.join(folder, filename)
@@ -121,3 +131,10 @@ class NNetWrapper(NeuralNet):
         map_location = None if args.cuda else 'cpu'
         checkpoint = torch.load(filepath, map_location=map_location)
         self.nnet.load_state_dict(checkpoint['state_dict'])
+        if 'optimizer' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            if args.cuda:
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.cuda()

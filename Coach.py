@@ -5,6 +5,7 @@ from collections import deque
 from pickle import Pickler, Unpickler
 from random import shuffle
 
+import mlflow
 import numpy as np
 from tqdm import tqdm
 
@@ -28,6 +29,7 @@ class Coach():
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
+        self.training_epoch = 0
 
     def executeEpisode(self):
         """
@@ -91,6 +93,7 @@ class Coach():
             # bookkeeping
             log.info(f'Starting Iter #{i} ...')
             # examples of the iteration
+            mlflow.log_metric('iteration_index', i, step=i)
             if not self.skipFirstSelfPlay or i > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
 
@@ -100,6 +103,7 @@ class Coach():
 
                 # save the iteration examples to the history 
                 self.trainExamplesHistory.append(iterationTrainExamples)
+                mlflow.log_metric('selfplay_examples', len(iterationTrainExamples), step=i)
 
             if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
                 log.warning(
@@ -120,7 +124,12 @@ class Coach():
             self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             pmcts = MCTS(self.game, self.pnet, self.args)
 
-            self.nnet.train(trainExamples)
+            training_history = self.nnet.train(trainExamples)
+            for epoch_stats in training_history:
+                self.training_epoch += 1
+                mlflow.log_metric('train_loss_pi', epoch_stats['loss_pi'], step=self.training_epoch)
+                mlflow.log_metric('train_loss_v', epoch_stats['loss_v'], step=self.training_epoch)
+                mlflow.log_metric('train_epoch', epoch_stats['epoch'], step=self.training_epoch)
             nmcts = MCTS(self.game, self.nnet, self.args)
 
             log.info('PITTING AGAINST PREVIOUS VERSION')
@@ -129,11 +138,18 @@ class Coach():
             pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
 
             log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
-            if pwins + nwins == 0 or float(nwins) / (pwins + nwins) < self.args.updateThreshold:
+            mlflow.log_metric('arena_new_wins', nwins, step=i)
+            mlflow.log_metric('arena_prev_wins', pwins, step=i)
+            mlflow.log_metric('arena_draws', draws, step=i)
+            acceptance_rate = float(nwins) / (pwins + nwins) if (pwins + nwins) > 0 else 0.0
+            mlflow.log_metric('arena_acceptance_rate', acceptance_rate, step=i)
+            if pwins + nwins == 0 or acceptance_rate < self.args.updateThreshold:
                 log.info('REJECTING NEW MODEL')
+                mlflow.log_metric('model_accepted', 0, step=i)
                 self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             else:
                 log.info('ACCEPTING NEW MODEL')
+                mlflow.log_metric('model_accepted', 1, step=i)
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
 
