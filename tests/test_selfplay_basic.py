@@ -1,72 +1,54 @@
-"""
-Ataxx Random Play Test (No-Pass Version)
-----------------------------------
-Bu dosya, pass hakkı bulunmayan Ataxx oyun ortamının (AtaxxGame) temel işlevlerinin doğru çalıştığını test eder.
-Amaç, iki oyuncunun rastgele hamlelerle oyunu tamamlayabildiği dinamik bir oyun döngüsünü gözlemlemektir.
+import os
+import sys
 
-Test Edilen Bileşenler:
-- getInitBoard()  →  Başlangıç tahtasının oluşturulması
-- getValidMoves() →  Geçerli hamlelerin hesaplanması
-- getNextState()  →  Hamle sonrası yeni tahtanın, sıradaki oyuncunun ve sürelerin güncellenmesi
-- getGameEnded()  →  Oyun bitiş koşullarının kontrolü
-
-Adım adım işlemler:
-1. 7x7 boyutlu Ataxx tahtası ve 100 saniyelik süre limitiyle oyun başlatılır.  
-2. Her turda geçerli hamleler belirlenir.  
-3. Geçerli hamleler arasından rastgele biri seçilerek uygulanır.  
-4. Yeni durum, oyuncu değişimi ve süre bilgileri ekrana yazdırılır.  
-5. Oyun, biri kazanana, süre dolana veya maksimum hamle (200) limitine ulaşılana kadar devam eder.
-
-Notlar:
-- Pass hakkı yoktur. Hamle yapamayan oyuncu oyunu kaybeder.
-- Her oyuncunun kendi süresi vardır; süre sırası geldiğinde azalır.
-"""
-
-import sys, os, time
 import numpy as np
+import pytest
 
-# Üst klasörü import yoluna ekle
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ataxx.AtaxxGame import AtaxxGame
 
-# Oyun başlat
-game = AtaxxGame(n=7, timer_limit=100)
-board = game.getInitBoard()
-player = 1
-move_count = 0
-MAX_MOVES = 200
 
-print("🎮 Başlangıç durumu:\n", board)
+def decode_action(n, action):
+    return np.unravel_index(action, (n, n, n, n))
 
-while True:
-    # Geçerli hamleleri bul
+
+def pick_lexicographic_action(game, board, player):
     valids = game.getValidMoves(board, player)
-    valid_indices = np.flatnonzero(valids)
+    if not np.any(valids):
+        return None
+    actions = np.flatnonzero(valids)
+    sorted_actions = sorted(actions, key=lambda a: decode_action(game.n, int(a)))
+    return int(sorted_actions[0])
 
-    # Oyun bitti mi?
-    result = game.getGameEnded(board, player)
-    if result != 0 or len(valid_indices) == 0:
-        print("\nOyun bitti! 🎯 (result =", result, ")")
-        print("Son tahta:\n", board)
-        print("Kalan zamanlar:", game.timers)
-        break
 
-    # Rastgele geçerli hamle seç
-    start_time = time.time()
-    action = np.random.choice(valid_indices)
-    board, player, timers = game.getNextState(board, player, int(action), start_time=start_time)
-    move_count += 1
+def test_deterministic_selfplay_reaches_terminal_state():
+    game = AtaxxGame(n=5, timer_limit=20)
+    board = game.getInitBoard()
+    player = 1
+    max_moves = 300
 
-    # Durumu yazdır
-    print("-" * 30)
-    print(f"{move_count}. hamle sonrası tahta (şu an oynayacak: player {player}):")
-    print(board)
-    print(f"⏱ Süreler -> P1: {timers[1]:.2f}s | P2: {timers[-1]:.2f}s")
+    for _ in range(max_moves):
+        result = game.getGameEnded(board, player)
+        if result != 0:
+            break
 
-    # Limit kontrolü
-    if move_count >= MAX_MOVES:
-        print("\n⚠ Maksimum hamle sayısına ulaşıldı, oyun durduruldu.")
-        break
+        action = pick_lexicographic_action(game, board, player)
+        assert action is not None, "Geçerli hamle bekleniyordu"
 
-print("Toplam hamle:", move_count)
+        board, player, timers = game.getNextState(board, player, action, elapsed=0.1)
+        assert timers[1] >= 0 and timers[-1] >= 0
+    else:
+        pytest.fail("Self-play döngüsü maks hamle sınırı içinde sona ermedi")
+
+    assert result != 0
+
+
+def test_string_representation_is_stable_across_calls():
+    game = AtaxxGame(n=5)
+    board = game.getInitBoard()
+    rep1 = game.stringRepresentation(board)
+    rep2 = game.stringRepresentation(board.copy())
+
+    assert isinstance(rep1, (bytes, bytearray))
+    assert rep1 == rep2

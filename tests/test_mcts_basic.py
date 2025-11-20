@@ -1,49 +1,71 @@
-"""
-Ataxx AlphaZero - MCTS Mini Test
-----------------------------------
-Bu dosya, Ataxx oyun ortamı üzerinde Monte Carlo Tree Search (MCTS) ve 
-sinir ağı tahmincisinin (NNetWrapper) birlikte doğru şekilde çalıştığını test eder.
+import os
+import sys
 
-Amaç:
-- MCTS’in AlphaZero tarzı politika (π) üretimini test etmek.
-- Modelin hamle olasılıklarını (policy vector) düzgün normalize edip etmediğini görmek.
-- Entegre sistemin (AtaxxGame + NNetWrapper + MCTS) sağlıklı çalıştığını doğrulamak.
+import numpy as np
+import pytest
 
-Adım adım işlemler:
-1️ Oyun ortamı (7x7 tahta) oluşturulur.
-2️ Nöral ağ (NNetWrapper) yüklenir.
-3️ MCTS, belirlenen parametrelerle (simülasyon sayısı ve cpuct değeri) başlatılır.
-4️ Başlangıç tahtası kanonik forma dönüştürülür.
-5️ MCTS üzerinden politika (hamle olasılıkları) hesaplanır ve ilk 20’si ile toplam olasılık yazdırılır.
-
-Bu test, AlphaZero tabanlı Ataxx ajanının karar verme mekanizmasının temel doğrulamasıdır.
-"""
-
-import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from utils import dotdict
-from ataxx.AtaxxGame import AtaxxGame
-from ataxx.pytorch.NNet import NNetWrapper
 from MCTS import MCTS
-import numpy as np
+from ataxx.AtaxxGame import AtaxxGame
+from utils import dotdict
 
-print(" MCTS mini test başlatılıyor...")
 
-game = AtaxxGame(7)
-nnet = NNetWrapper(game)
-args = dotdict({'numMCTSSims': 25, 'cpuct': 1.0})
-mcts = MCTS(game, nnet, args)
+class DummyNet:
+    def __init__(self, game):
+        self.action_size = game.getActionSize()
+        self.calls = 0
+        logits = np.linspace(1.0, -1.0, self.action_size, dtype=np.float32)
+        self.policy = np.exp(logits) / np.exp(logits).sum()
 
-board = game.getInitBoard()
-player = 1
-canon = game.getCanonicalForm(board, player)
+    def predict(self, board):
+        self.calls += 1
+        board = np.asarray(board, dtype=np.int8)
+        scaled_value = float(np.tanh(board.sum() / 10.0))
+        return self.policy.copy(), scaled_value
 
-canon_input = np.stack([(canon == 1).astype(np.float32),
-                        (canon == -1).astype(np.float32)])
 
-pi = mcts.getActionProb(canon_input, temp=1)
-print("\nPolicy uzunluğu:", len(pi))
-np.set_printoptions(precision=4, suppress=False)
-print("İlk 20 olasılık:", pi[:20])
-print("Toplam olasılık:", np.sum(pi))
+@pytest.fixture
+def mcts_components():
+    game = AtaxxGame(n=5)
+    net = DummyNet(game)
+    args = dotdict({'numMCTSSims': 15, 'cpuct': 1.2})
+    return game, net, args
+
+
+def test_mcts_policy_support_matches_valid_actions(mcts_components):
+    game, net, args = mcts_components
+    mcts = MCTS(game, net, args)
+
+    board = game.getInitBoard()
+    canon = game.getCanonicalForm(board, player=1)
+    probs = np.array(mcts.getActionProb(canon, temp=1), dtype=np.float32)
+    valids = game.getValidMoves(canon, player=1)
+
+    assert np.all(probs[valids == 0] == 0)
+    assert pytest.approx(float(probs.sum()), rel=1e-6) == 1.0
+    assert net.calls == args.numMCTSSims
+
+
+def test_mcts_temp_zero_returns_single_action(mcts_components):
+    game, net, args = mcts_components
+    mcts = MCTS(game, net, args)
+
+    board = game.getCanonicalForm(game.getInitBoard(), 1)
+    probs = np.array(mcts.getActionProb(board, temp=0), dtype=np.float32)
+
+    assert float(probs.sum()) == 1.0
+    assert np.count_nonzero(probs) == 1
+
+
+def test_mcts_respects_terminal_positions(mcts_components):
+    game, net, args = mcts_components
+    mcts = MCTS(game, net, args)
+
+    board = np.full((game.n, game.n), 1, dtype=np.int8)
+    board[0, 0] = -1  # küçük farklarla terminal
+    canon = game.getCanonicalForm(board, 1)
+
+    probs = np.array(mcts.getActionProb(canon, temp=1), dtype=np.float32)
+    assert np.all(probs == 0)
+    assert np.all(game.getValidMoves(canon, 1) == 0)
