@@ -115,14 +115,27 @@ class NNetWrapper(NeuralNet):
     def loss_v(self, targets, outputs):
         return torch.sum((targets - outputs.view(-1)) ** 2) / targets.size()[0]
 
-    def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
+    def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar', save_optimizer=None):
+        """
+        Checkpoint kaydet. Optimizer state opsiyonel (bellek tasarrufu için).
+        save_optimizer: None ise args.save_optimizer'a bakar, True/False ise direkt kullanır.
+        """
         filepath = os.path.join(folder, filename)
         if not os.path.exists(folder):
-            os.mkdir(folder)
-        torch.save({
+            os.makedirs(folder, exist_ok=True)
+        
+        # Optimizer state kaydetme kararı
+        if save_optimizer is None:
+            save_optimizer = getattr(args, 'save_optimizer', True)  # Varsayılan True (geriye uyumluluk)
+        
+        checkpoint_dict = {
             'state_dict': self.nnet.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-        }, filepath)
+        }
+        
+        if save_optimizer:
+            checkpoint_dict['optimizer'] = self.optimizer.state_dict()
+        
+        torch.save(checkpoint_dict, filepath)
 
     def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
         filepath = os.path.join(folder, filename)

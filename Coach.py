@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import glob
 from collections import deque
 from pickle import Pickler, Unpickler
 from random import shuffle
@@ -110,8 +111,12 @@ class Coach():
                     f"Removing the oldest entry in trainExamples. len(trainExamplesHistory) = {len(self.trainExamplesHistory)}")
                 self.trainExamplesHistory.pop(0)
             # backup history to a file
-            # NB! the examples were collected using the model from the previous iteration, so (i-1)  
-            self.saveTrainExamples(i - 1)
+            # NB! the examples were collected using the model from the previous iteration, so (i-1)
+            # Examples kaydetme opsiyonel (bellek tasarrufu için)
+            if getattr(self.args, 'save_examples', True):
+                self.saveTrainExamples(i - 1)
+            else:
+                log.info('Skipping examples save (save_examples=False, bellek tasarrufu)')
 
             # shuffle examples before training
             trainExamples = []
@@ -152,9 +157,74 @@ class Coach():
                 mlflow.log_metric('model_accepted', 1, step=i)
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='latest.pth.tar')
+                
+                # Eski dosyaları temizle
+                self.cleanupOldFiles(i)
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
+
+    def cleanupOldFiles(self, current_iteration):
+        """Eski checkpoint ve examples dosyalarını temizle (bellek tasarrufu)"""
+        folder = self.args.checkpoint
+        if not os.path.exists(folder):
+            return
+        
+        # Eski checkpoint dosyalarını temizle
+        keep_checkpoints = getattr(self.args, 'keep_checkpoints', 3)
+        checkpoint_pattern = os.path.join(folder, 'checkpoint_*.pth.tar')
+        checkpoint_files = glob.glob(checkpoint_pattern)
+        
+        # Checkpoint numaralarına göre sırala
+        def get_iteration_num(filename):
+            try:
+                basename = os.path.basename(filename)
+                num_str = basename.replace('checkpoint_', '').replace('.pth.tar', '')
+                return int(num_str)
+            except:
+                return -1
+        
+        checkpoint_files.sort(key=get_iteration_num)
+        
+        # Son N checkpoint'i tut, gerisini sil
+        if len(checkpoint_files) > keep_checkpoints:
+            files_to_delete = checkpoint_files[:-keep_checkpoints]
+            for f in files_to_delete:
+                try:
+                    os.remove(f)
+                    log.info(f'Deleted old checkpoint: {os.path.basename(f)}')
+                    # İlgili examples dosyasını da sil
+                    examples_file = f + '.examples'
+                    if os.path.exists(examples_file):
+                        os.remove(examples_file)
+                        log.info(f'Deleted old examples: {os.path.basename(examples_file)}')
+                except Exception as e:
+                    log.warning(f'Could not delete {f}: {e}')
+        
+        # Eski examples dosyalarını temizle (checkpoint'e bağlı olmayan)
+        keep_examples = getattr(self.args, 'keep_examples', 5)
+        examples_pattern = os.path.join(folder, 'iteration_*.examples')
+        examples_files = glob.glob(examples_pattern)
+        
+        def get_iteration_num_examples(filename):
+            try:
+                basename = os.path.basename(filename)
+                num_str = basename.replace('iteration_', '').replace('.examples', '')
+                return int(num_str)
+            except:
+                return -1
+        
+        examples_files.sort(key=get_iteration_num_examples)
+        
+        if len(examples_files) > keep_examples:
+            files_to_delete = examples_files[:-keep_examples]
+            for f in files_to_delete:
+                try:
+                    os.remove(f)
+                    log.info(f'Deleted old examples file: {os.path.basename(f)}')
+                except Exception as e:
+                    log.warning(f'Could not delete {f}: {e}')
 
     def saveTrainExamples(self, iteration):
         folder = self.args.checkpoint
@@ -164,20 +234,30 @@ class Coach():
         with open(filename, "wb+") as f:
             Pickler(f).dump(self.trainExamplesHistory)
         f.closed
+        
+        # Eski dosyaları temizle
+        self.cleanupOldFiles(iteration)
 
     def loadTrainExamples(self):
         modelFile = os.path.join(self.args.load_folder_file[0], self.args.load_folder_file[1])
         examplesFile = modelFile + ".examples"
         if not os.path.isfile(examplesFile):
             log.warning(f'File "{examplesFile}" with trainExamples not found!')
-            r = input("Continue? [y|n]")
-            if r != "y":
-                sys.exit()
+            log.warning('Examples dosyası yok - eğitime sıfırdan başlayacak (ilk iterasyonda self-play yapılacak)')
+            # Otomatik devam et (interaktif input yerine)
+            self.trainExamplesHistory = []  # Boş başla
+            self.skipFirstSelfPlay = False  # İlk iterasyonda self-play yap
+            log.info('Continuing without examples file...')
         else:
             log.info("File with trainExamples found. Loading it...")
-            with open(examplesFile, "rb") as f:
-                self.trainExamplesHistory = Unpickler(f).load()
-            log.info('Loading done!')
-
-            # examples based on the model were already collected (loaded)
-            self.skipFirstSelfPlay = True
+            try:
+                with open(examplesFile, "rb") as f:
+                    self.trainExamplesHistory = Unpickler(f).load()
+                log.info(f'Loading done! Loaded {len(self.trainExamplesHistory)} iteration(s) of examples.')
+                # examples based on the model were already collected (loaded)
+                self.skipFirstSelfPlay = True
+            except Exception as e:
+                log.error(f'Error loading examples file: {e}')
+                log.warning('Starting with empty examples history...')
+                self.trainExamplesHistory = []
+                self.skipFirstSelfPlay = False
