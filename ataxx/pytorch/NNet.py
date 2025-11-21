@@ -126,7 +126,8 @@ class NNetWrapper(NeuralNet):
         
         # Optimizer state kaydetme kararı
         if save_optimizer is None:
-            save_optimizer = getattr(args, 'save_optimizer', True)  # Varsayılan True (geriye uyumluluk)
+            # args objesinde save_optimizer varsa kullan, yoksa varsayılan True
+            save_optimizer = args.get('save_optimizer', True)
         
         checkpoint_dict = {
             'state_dict': self.nnet.state_dict(),
