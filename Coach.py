@@ -159,6 +159,10 @@ class Coach():
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
                 self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='latest.pth.tar')
                 
+                # best.pth.tar için examples dosyasını da kaydet
+                if getattr(self.args, 'save_examples', True):
+                    self.saveBestExamples()
+                
                 # Eski dosyaları temizle
                 self.cleanupOldFiles(i)
 
@@ -238,8 +242,21 @@ class Coach():
         # Eski dosyaları temizle
         self.cleanupOldFiles(iteration)
 
+    def saveBestExamples(self):
+        """best.pth.tar için examples dosyasını kaydet"""
+        folder = self.args.checkpoint
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        filename = os.path.join(folder, 'best.pth.tar.examples')
+        with open(filename, "wb+") as f:
+            Pickler(f).dump(self.trainExamplesHistory)
+        f.closed
+        log.info(f'Saved best.pth.tar.examples with {len(self.trainExamplesHistory)} iteration(s) of examples.')
+
     def loadTrainExamples(self):
         modelFile = os.path.join(self.args.load_folder_file[0], self.args.load_folder_file[1])
+        # Windows yol birleştirme sorununu çözmek için normalize et
+        modelFile = os.path.normpath(modelFile)
         examplesFile = modelFile + ".examples"
         if not os.path.isfile(examplesFile):
             log.warning(f'File "{examplesFile}" with trainExamples not found!')
