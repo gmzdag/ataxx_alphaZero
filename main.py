@@ -18,20 +18,24 @@ args = dotdict({
     'numIters': 1000,
     'numEps': 60,               # Number of complete self-play games (optimized: 100->60, daha hızlı ama yeterli)
     'tempThreshold': 15,        # Temperature threshold for exploration
-    'updateThreshold': 0.6,     # During arena playoff, new neural net will be accepted if threshold or more of games are won.
+    'updateThreshold': 0.55,    # During arena playoff, new neural net will be accepted if threshold or more of games are won. (0.6->0.55, %55 kazanmak yeterli)
     'maxlenOfQueue': 50000,     # Number of game examples (optimized: 200000->50000, bellek tasarrufu)
-    'numMCTSSims': 30,          # Number of games moves for MCTS (optimized: 50->30, daha hızlı)
+    'numMCTSSims': 50,          # Number of games moves for MCTS (30->50, daha iyi oyun kalitesi için artırıldı)
     'arenaCompare': 20,         # Number of games to play during arena (optimized: 40->20, daha hızlı test)
     'cpuct': 1,
 
     'checkpoint': './temp/',
     'load_model': True,         # True yaparak mevcut checkpoint'i yükle
-    'load_folder_file': ('./temp', 'best.pth.tar'),  # best.pth.tar veya latest.pth.tar kullanabilirsin
+    # NOT: best.pth.tar önerilir (en iyi model). Kod otomatik olarak:
+    # 1. best.pth.tar.examples'i yükler (eğer varsa)
+    # 2. Checkpoint dosyası OLAN en son examples'ı yükler (reddedilmiş iterasyonların examples'ları yüklenmez)
+    # 3. State dosyasından hangi iterasyondan devam edileceğini belirler
+    'load_folder_file': ('./temp', 'best.pth.tar'),  # best.pth.tar önerilir (en iyi model), latest.pth.tar da kullanılabilir
     'numItersForTrainExamplesHistory': 10,  # Optimized: 20->10, daha az geçmiş tutar (bellek tasarrufu)
     
-    # Bellek optimizasyonu için ek parametreler
-    'keep_checkpoints': 3,      # Sadece son 3 checkpoint'i tut (eski olanları sil)
-    'keep_examples': 5,         # Sadece son 5 examples dosyasını tut
+    # Bellek optimizasyonu için ek parametreler (otomatik temizlik)
+    'keep_checkpoints': 2,      # Sadece son 2 checkpoint'i tut (eski olanları otomatik sil)
+    'keep_examples': 3,         # Sadece son 3 examples dosyasını tut (gereksiz dosyalar otomatik silinir)
     'save_optimizer': False,    # Optimizer state kaydetme (bellek tasarrufu, eğitim sırasında reset olur)
     'save_examples': True,      # Examples dosyalarını kaydet (False yaparsan bellek tasarrufu, ama eğitime devam ederken examples yoksa sıfırdan başlar)
 })

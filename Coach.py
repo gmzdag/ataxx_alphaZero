@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import glob
+import json
 from collections import deque
 from pickle import Pickler, Unpickler
 from random import shuffle
@@ -31,6 +32,7 @@ class Coach():
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
         self.training_epoch = 0
+        self.current_iteration = 0  # Mevcut iterasyon numarası (kaldığı yerden devam için)
 
     def executeEpisode(self):
         """
@@ -81,6 +83,7 @@ class Coach():
                     result.append((board_example, policy, value))
                 
                 return result
+    
     def learn(self):
         """
         Performs numIters iterations with numEps episodes of self-play in each
@@ -88,14 +91,34 @@ class Coach():
         examples in trainExamples (which has a maximum length of maxlenofQueue).
         It then pits the new neural network against the old one and accepts it
         only if it wins >= updateThreshold fraction of games.
+        
+        Eğer state dosyası varsa, son tamamlanan iterasyondan devam eder.
         """
 
-        for i in range(1, self.args.numIters + 1):
+        # State'ten son iterasyon numarasını yükle (varsa)
+        self.loadState()
+        start_iteration = self.current_iteration + 1  # Son tamamlanan iterasyondan sonraki ile başla
+        
+        # Başlangıçta gereksiz dosyaları temizle (otomatik temizlik)
+        log.info('🧹 Başlangıç temizliği yapılıyor...')
+        self.cleanupOldFiles(self.current_iteration)
+        
+        if start_iteration > 1:
+            log.info(f'Kaldığı yerden devam ediliyor: Iterasyon {start_iteration}/{self.args.numIters}')
+            # Kaldığı yerden devam ederken, self-play yapılmalı (examples'lar önceki iterasyondan)
+            self.skipFirstSelfPlay = False
+        else:
+            log.info(f'Eğitime başlanıyor: Iterasyon 1/{self.args.numIters}')
+
+        for i in range(start_iteration, self.args.numIters + 1):
             # bookkeeping
             log.info(f'Starting Iter #{i} ...')
             # examples of the iteration
             mlflow.log_metric('iteration_index', i, step=i)
-            if not self.skipFirstSelfPlay or i > 1:
+            # Eğer devam ediyorsak (start_iteration > 1), her zaman self-play yap
+            # Eğer ilk başlangıçsa ve examples yüklendiyse, ilk iterasyonda self-play yapma
+            should_skip_selfplay = (i == 1 and self.skipFirstSelfPlay and start_iteration == 1)
+            if not should_skip_selfplay:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
 
                 for _ in tqdm(range(self.args.numEps), desc="Self Play"):
@@ -109,7 +132,11 @@ class Coach():
             if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
                 log.warning(
                     f"Removing the oldest entry in trainExamples. len(trainExamplesHistory) = {len(self.trainExamplesHistory)}")
-                self.trainExamplesHistory.pop(0)
+                # deque için popleft(), liste için pop(0) kullan
+                if isinstance(self.trainExamplesHistory, deque):
+                    self.trainExamplesHistory.popleft()
+                else:
+                    self.trainExamplesHistory.pop(0)
             # backup history to a file
             # NB! the examples were collected using the model from the previous iteration, so (i-1)
             # Examples kaydetme opsiyonel (bellek tasarrufu için)
@@ -121,8 +148,22 @@ class Coach():
             # shuffle examples before training
             trainExamples = []
             for e in self.trainExamplesHistory:
-                trainExamples.extend(e)
+                # e bir deque veya liste olabilir, içindeki elemanları ekle
+                if isinstance(e, (list, deque)):
+                    for item in e:
+                        # Sadece tuple/liste olan elemanları ekle (float gibi tek değerleri atla)
+                        if isinstance(item, (tuple, list)) and len(item) >= 3:
+                            trainExamples.append(item)
+                else:
+                    # e direkt bir example ise
+                    if isinstance(e, (tuple, list)) and len(e) >= 3:
+                        trainExamples.append(e)
             shuffle(trainExamples)
+            
+            # trainExamples boş olabilir (ilk iterasyonda skipFirstSelfPlay True ise)
+            if len(trainExamples) == 0:
+                log.warning(f'No training examples available for iteration {i}! Skipping training.')
+                continue
 
             # training new network, keeping a copy of the old one
             self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
@@ -152,6 +193,8 @@ class Coach():
                 log.info('REJECTING NEW MODEL')
                 mlflow.log_metric('model_accepted', 0, step=i)
                 self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+                # Model reddedilse bile gereksiz dosyaları temizle (bellek tasarrufu)
+                self.cleanupOldFiles(i)
             else:
                 log.info('ACCEPTING NEW MODEL')
                 mlflow.log_metric('model_accepted', 1, step=i)
@@ -165,6 +208,11 @@ class Coach():
                 
                 # Eski dosyaları temizle
                 self.cleanupOldFiles(i)
+            
+            # Her iterasyon sonunda (başarılı veya başarısız olsun) state'i kaydet
+            self.current_iteration = i
+            self.saveState(i)
+            log.info(f'Iterasyon {i} tamamlandı. State kaydedildi.')
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
@@ -254,27 +302,197 @@ class Coach():
         log.info(f'Saved best.pth.tar.examples with {len(self.trainExamplesHistory)} iteration(s) of examples.')
 
     def loadTrainExamples(self):
-        modelFile = os.path.join(self.args.load_folder_file[0], self.args.load_folder_file[1])
-        # Windows yol birleştirme sorununu çözmek için normalize et
-        modelFile = os.path.normpath(modelFile)
-        examplesFile = modelFile + ".examples"
+        # Yolu mutlak yola çevir (Windows yol sorunlarını önlemek için)
+        folder = os.path.abspath(self.args.load_folder_file[0])
+        filename = self.args.load_folder_file[1]
+        modelFile = os.path.join(folder, filename)
+        examplesFile = os.path.join(folder, filename + ".examples")
+        
+        # Debug için log
+        log.debug(f'Looking for examples file at: "{examplesFile}"')
+        log.debug(f'Folder exists: {os.path.exists(folder)}')
+        if os.path.exists(folder):
+            log.debug(f'Files in folder: {os.listdir(folder)}')
+        
+        # State'ten son iterasyon numarasını yükle (hangi iterasyondan devam edileceğini bilmek için)
+        self.loadState()
+        last_valid_iteration = self.current_iteration
+        
+        # Önce doğrudan examples dosyasını kontrol et (best.pth.tar.examples veya latest.pth.tar.examples)
         if not os.path.isfile(examplesFile):
             log.warning(f'File "{examplesFile}" with trainExamples not found!')
-            log.warning('Examples dosyası yok - eğitime sıfırdan başlayacak (ilk iterasyonda self-play yapılacak)')
-            # Otomatik devam et (interaktif input yerine)
-            self.trainExamplesHistory = []  # Boş başla
-            self.skipFirstSelfPlay = False  # İlk iterasyonda self-play yap
-            log.info('Continuing without examples file...')
-        else:
-            log.info("File with trainExamples found. Loading it...")
-            try:
-                with open(examplesFile, "rb") as f:
-                    self.trainExamplesHistory = Unpickler(f).load()
-                log.info(f'Loading done! Loaded {len(self.trainExamplesHistory)} iteration(s) of examples.')
-                # examples based on the model were already collected (loaded)
-                self.skipFirstSelfPlay = True
-            except Exception as e:
-                log.error(f'Error loading examples file: {e}')
-                log.warning('Starting with empty examples history...')
+            
+            # Fallback: En uygun examples dosyasını ara
+            if os.path.exists(folder):
+                examplesFile = None
+                
+                # 1. Fallback: best.pth.tar.examples dosyasını kontrol et (best model ile eşleşir)
+                best_examples = os.path.join(folder, 'best.pth.tar.examples')
+                best_model = os.path.join(folder, 'best.pth.tar')
+                if os.path.isfile(best_examples) and os.path.isfile(best_model):
+                    examplesFile = best_examples
+                    log.info(f'✓ Bulundu: {os.path.basename(examplesFile)} (best.pth.tar ile eşleşiyor)')
+                
+                # 2. Fallback: State dosyasından bilinen son iterasyon veya mevcut checkpoint dosyalarından
+                # Checkpoint dosyası OLAN examples dosyalarını ara (reddedilmiş iterasyonların examples'ları yüklenmesin)
+                if not examplesFile:
+                    checkpoint_pattern = os.path.join(folder, 'checkpoint_*.pth.tar.examples')
+                    all_checkpoint_examples = glob.glob(checkpoint_pattern)
+                    
+                    # Sadece checkpoint dosyası OLAN examples dosyalarını filtrele
+                    valid_checkpoint_examples = []
+                    def get_iteration_num(f):
+                        try:
+                            basename = os.path.basename(f)
+                            num_str = basename.replace('checkpoint_', '').replace('.pth.tar.examples', '')
+                            return int(num_str)
+                        except:
+                            return -1
+                    
+                    for examples_file in all_checkpoint_examples:
+                        # Karşılık gelen checkpoint dosyasının var olduğundan emin ol
+                        checkpoint_file = examples_file.replace('.examples', '')
+                        if os.path.exists(checkpoint_file):
+                            iter_num = get_iteration_num(examples_file)
+                            # State'ten bilinen son iterasyondan önceki veya eşit olan checkpoint'leri tercih et
+                            if iter_num <= last_valid_iteration or last_valid_iteration == 0:
+                                valid_checkpoint_examples.append((iter_num, examples_file))
+                    
+                    if valid_checkpoint_examples:
+                        # Iterasyon numarasına göre sırala (en yüksek geçerli iterasyon)
+                        valid_checkpoint_examples.sort(key=lambda x: x[0], reverse=True)
+                        examplesFile = valid_checkpoint_examples[0][1]
+                        log.info(f'✓ Bulundu: {os.path.basename(examplesFile)} (checkpoint dosyası mevcut, iterasyon {valid_checkpoint_examples[0][0]})')
+                
+                # 3. Fallback: Son çare olarak latest.pth.tar.examples kontrol et
+                if not examplesFile:
+                    latest_examples = os.path.join(folder, 'latest.pth.tar.examples')
+                    latest_model = os.path.join(folder, 'latest.pth.tar')
+                    if os.path.isfile(latest_examples) and os.path.isfile(latest_model):
+                        examplesFile = latest_examples
+                        log.info(f'✓ Bulundu: {os.path.basename(examplesFile)} (latest.pth.tar ile eşleşiyor)')
+                
+                # 4. Son çare: iteration_*.examples dosyalarını ara (checkpoint'e bağlı olmayan)
+                if not examplesFile:
+                    iteration_pattern = os.path.join(folder, 'iteration_*.examples')
+                    iteration_files = glob.glob(iteration_pattern)
+                    
+                    if iteration_files:
+                        def get_iteration_num_examples(f):
+                            try:
+                                basename = os.path.basename(f)
+                                num_str = basename.replace('iteration_', '').replace('.examples', '')
+                                return int(num_str)
+                            except:
+                                return -1
+                        
+                        iteration_files.sort(key=get_iteration_num_examples, reverse=True)
+                        examplesFile = iteration_files[0]
+                        log.warning(f'⚠ Bulundu: {os.path.basename(examplesFile)} (checkpoint dosyası kontrol edilmedi, iteration examples)')
+                
+                if not examplesFile:
+                    log.warning('Examples dosyası yok - eğitime sıfırdan başlayacak (ilk iterasyonda self-play yapılacak)')
+                    # Otomatik devam et (interaktif input yerine)
+                    self.trainExamplesHistory = []  # Boş başla
+                    self.skipFirstSelfPlay = False  # İlk iterasyonda self-play yap
+                    log.info('Continuing without examples file...')
+                    return
+            else:
+                log.warning('Examples dosyası yok - eğitime sıfırdan başlayacak (ilk iterasyonda self-play yapılacak)')
                 self.trainExamplesHistory = []
                 self.skipFirstSelfPlay = False
+                log.info('Continuing without examples file...')
+                return
+        
+        # Examples dosyasını yükle
+        log.info("File with trainExamples found. Loading it...")
+        try:
+            with open(examplesFile, "rb") as f:
+                loaded_data = Unpickler(f).load()
+            # Yüklenen veriyi liste olarak tut (deque ise listeye çevir)
+            if isinstance(loaded_data, deque):
+                self.trainExamplesHistory = list(loaded_data)
+            elif isinstance(loaded_data, list):
+                self.trainExamplesHistory = loaded_data
+            else:
+                # Eğer başka bir tip ise, liste içine al
+                self.trainExamplesHistory = list(loaded_data) if hasattr(loaded_data, '__iter__') else [loaded_data]
+            log.info(f'Loading done! Loaded {len(self.trainExamplesHistory)} iteration(s) of examples.')
+            # examples based on the model were already collected (loaded)
+            self.skipFirstSelfPlay = True
+        except Exception as e:
+            log.error(f'Error loading examples file: {e}')
+            log.warning('Starting with empty examples history...')
+            self.trainExamplesHistory = []
+            self.skipFirstSelfPlay = False
+
+    def saveState(self, iteration):
+        """
+        Mevcut iterasyon numarasını state dosyasına kaydet.
+        Bu sayede program yeniden başlatıldığında kaldığı yerden devam edebilir.
+        """
+        folder = self.args.checkpoint
+        if not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
+        
+        state_file = os.path.join(folder, 'training_state.json')
+        state_data = {
+            'current_iteration': iteration,
+            'training_epoch': self.training_epoch
+        }
+        
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+            log.debug(f'State kaydedildi: Iterasyon {iteration}')
+        except Exception as e:
+            log.warning(f'State kaydedilemedi: {e}')
+
+    def loadState(self):
+        """
+        Kaydedilmiş state dosyasından son iterasyon numarasını yükle.
+        Eğer state dosyası yoksa veya checkpoint dosyalarından en son iterasyonu bul.
+        """
+        folder = self.args.checkpoint
+        state_file = os.path.join(folder, 'training_state.json')
+        
+        # 1. Önce state dosyasını kontrol et
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as f:
+                    state_data = json.load(f)
+                self.current_iteration = state_data.get('current_iteration', 0)
+                self.training_epoch = state_data.get('training_epoch', 0)
+                log.info(f'State dosyası yüklendi: Son tamamlanan iterasyon {self.current_iteration}')
+                return
+            except Exception as e:
+                log.warning(f'State dosyası yüklenemedi: {e}. Checkpoint dosyalarından tespit edilecek...')
+        
+        # 2. State dosyası yoksa, checkpoint dosyalarından en son iterasyonu bul
+        if os.path.exists(folder):
+            checkpoint_pattern = os.path.join(folder, 'checkpoint_*.pth.tar')
+            checkpoint_files = glob.glob(checkpoint_pattern)
+            
+            if checkpoint_files:
+                def get_iteration_num(filename):
+                    try:
+                        basename = os.path.basename(filename)
+                        num_str = basename.replace('checkpoint_', '').replace('.pth.tar', '')
+                        return int(num_str)
+                    except:
+                        return -1
+                
+                checkpoint_files.sort(key=get_iteration_num, reverse=True)
+                last_checkpoint = checkpoint_files[0]
+                last_iteration = get_iteration_num(last_checkpoint)
+                
+                if last_iteration > 0:
+                    self.current_iteration = last_iteration
+                    log.info(f'Checkpoint dosyalarından tespit edildi: Son tamamlanan iterasyon {self.current_iteration}')
+                    # Tespit edilen state'i kaydet
+                    self.saveState(self.current_iteration)
+                    return
+        
+        # 3. Hiçbir şey bulunamadıysa, sıfırdan başla
+        self.current_iteration = 0
+        log.info('State bulunamadı. Eğitime sıfırdan başlanacak.')

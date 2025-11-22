@@ -32,8 +32,23 @@ class NNetWrapper(NeuralNet):
 
     def train(self, examples):
         """
-        examples: list of (board, pi, v)
+        examples: list of (board, pi, v) or (board, player, pi, v)
         """
+        # Examples formatını normalize et: (board, pi, v) formatına çevir
+        normalized_examples = []
+        for ex in examples:
+            if len(ex) == 3:
+                # Zaten doğru format: (board, pi, v)
+                normalized_examples.append(ex)
+            elif len(ex) == 4:
+                # Eski format: (board, player, pi, v) -> (board, pi, v)
+                board, player, pi, v = ex
+                normalized_examples.append((board, pi, v))
+            else:
+                raise ValueError(f"Invalid example format: expected 3 or 4 elements, got {len(ex)}: {ex}")
+        
+        examples = normalized_examples
+        
         epoch_history = []
         for epoch in range(args.epochs):
             print('EPOCH ::: ' + str(epoch + 1))
